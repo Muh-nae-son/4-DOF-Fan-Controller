@@ -1,0 +1,78 @@
+// ESP32 Arduino core v3.x PWM test
+// GPIO17 ("P17") -> drives your 2N3904 -> IRLZ44N gate driver (single NPN pull-down + 5V pull-up)
+// With that hardware, PWM is usually INVERTED (HIGH = fan off).
+// We'll invert in hardware using ledcOutputInvert().
+
+const uint8_t PWM_PIN = 17;
+
+// Because you're using a 1N4006 (slow diode), start with a modest PWM frequency:
+const uint32_t PWM_FREQ = 2000;   // 2 kHz
+const uint8_t  PWM_RES  = 8;      // 8-bit duty: 0..255
+
+const bool INVERT_PWM_OUTPUT = true;  // set false if your wiring makes it non-inverted
+
+uint32_t DUTY_MAX;
+
+bool setDuty(uint32_t duty) {
+  if (duty > DUTY_MAX) duty = DUTY_MAX;
+  return ledcWrite(PWM_PIN, duty);   // v3.x API: ledcWrite(pin, duty)
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  DUTY_MAX = (1UL << PWM_RES) - 1;
+
+  // Attach PWM to pin (v3.x API)
+  if (!ledcAttach(PWM_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed. Try a different pin/freq/resolution.");
+    while (true) delay(1000);
+  }
+
+  // Optional: invert PWM in hardware (helps with your single-NPN gate pull-down method)
+  if (!ledcOutputInvert(PWM_PIN, INVERT_PWM_OUTPUT)) {
+    Serial.println("WARNING: ledcOutputInvert failed (continuing).");
+  }
+
+  // Start OFF (0% fan command)
+  setDuty(0);
+
+  Serial.println("ESP32 Fan PWM Test (core v3.x)");
+  Serial.print("Pin: "); Serial.println(PWM_PIN);
+  Serial.print("Freq: "); Serial.print(PWM_FREQ); Serial.println(" Hz");
+  Serial.print("Res: "); Serial.print(PWM_RES); Serial.println(" bits");
+  Serial.print("Invert output: "); Serial.println(INVERT_PWM_OUTPUT ? "true" : "false");
+  Serial.println("Commands: 0=off, 1=25%, 2=50%, 3=75%, 4=100%, r=ramp");
+}
+
+void loop() {
+  if (Serial.available()) {
+    char c = (char)Serial.read();
+
+    if (c == '0') { setDuty(0);                 Serial.println("Duty 0%"); }
+    if (c == '1') { setDuty(DUTY_MAX * 25 / 100); Serial.println("Duty 25%"); }
+    if (c == '2') { setDuty(DUTY_MAX * 50 / 100); Serial.println("Duty 50%"); }
+    if (c == '3') { setDuty(DUTY_MAX * 75 / 100); Serial.println("Duty 75%"); }
+    if (c == '4') { setDuty(DUTY_MAX);            Serial.println("Duty 100%"); }
+
+    if (c == 'r' || c == 'R') {
+      Serial.println("Ramping up...");
+      for (uint32_t d = 0; d <= DUTY_MAX; d += 5) {
+        setDuty(d);
+        delay(50);
+      }
+      delay(400);
+
+      Serial.println("Ramping down...");
+      for (int d = (int)DUTY_MAX; d >= 0; d -= 5) {
+        setDuty((uint32_t)d);
+        delay(50);
+      }
+      setDuty(0);
+      Serial.println("Ramp done. Back to OFF.");
+    }
+  }
+
+  delay(10);
+}
