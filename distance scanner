@@ -1,0 +1,44 @@
+#include <Wire.h>
+#include <VL53L1X.h>
+
+VL53L1X sensor;
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  // Your wiring: SDA=21, SCL=22
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+
+  Serial.println("VL53L1X distance test...");
+
+  sensor.setTimeout(500);
+
+  if (!sensor.init()) {
+    Serial.println("ERROR: VL53L1X init failed (but 0x29 was seen).");
+    while (1) delay(1000);
+  }
+
+  // Try Long mode first (good general test)
+  sensor.setDistanceMode(VL53L1X::Long);
+
+  // 50ms timing budget is a nice starting point
+  sensor.setMeasurementTimingBudget(50000);
+
+  // Start continuous measurements
+  sensor.startContinuous(50);
+}
+
+void loop() {
+  uint16_t mm = sensor.read();
+
+  if (sensor.timeoutOccurred()) {
+    Serial.println("TIMEOUT");
+  } else {
+    Serial.print(mm);
+    Serial.println(" mm");
+  }
+
+  delay(100);
+}
