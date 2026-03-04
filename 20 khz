@@ -1,0 +1,44 @@
+const int PWM_PIN = 17;
+
+const int PWM_FREQ = 20000;   // 20 kHz (quiet)
+const int PWM_RES  = 8;       // 0–255 duty
+
+int targetDuty = 0;
+int currentDuty = 0;
+
+void setup() {
+  Serial.begin(115200);
+
+  ledcAttach(PWM_PIN, PWM_FREQ, PWM_RES);
+
+  Serial.println("Fan control ready.");
+  Serial.println("Enter 0–100 for fan speed %");
+}
+
+void loop() {
+
+  // Read serial input
+  if (Serial.available()) {
+
+    int percent = Serial.parseInt();
+
+    if (percent >= 0 && percent <= 100) {
+      targetDuty = map(percent, 0, 100, 0, 255);
+
+      Serial.print("Target speed: ");
+      Serial.print(percent);
+      Serial.println("%");
+    }
+
+    // clear buffer
+    while (Serial.available()) Serial.read();
+  }
+
+  // Smooth ramp toward target
+  if (currentDuty < targetDuty) currentDuty++;
+  if (currentDuty > targetDuty) currentDuty--;
+
+  ledcWrite(PWM_PIN, currentDuty);
+
+  delay(5);   // controls ramp smoothness
+}
