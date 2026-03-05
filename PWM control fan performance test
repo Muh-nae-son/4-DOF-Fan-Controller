@@ -1,78 +1,82 @@
-// ESP32 Arduino core v3.x PWM test
-// GPIO17 ("P17") -> drives your 2N3904 -> IRLZ44N gate driver (single NPN pull-down + 5V pull-up)
-// With that hardware, PWM is usually INVERTED (HIGH = fan off).
-// We'll invert in hardware using ledcOutputInvert().
+// ESP32 (Arduino core 3.x) - 2x independent 4-wire PWM fan control
+// Pins: GPIO25 and GPIO26
+// PWM: 25 kHz, 8-bit duty (0..255)
+// Assumes NPN pull-down on each fan PWM wire => inverted logic
 
-const uint8_t PWM_PIN = 17;
+const int FAN1_PIN = 25;
+const int FAN2_PIN = 26;
 
-// Because you're using a 1N4006 (slow diode), start with a modest PWM frequency:
-const uint32_t PWM_FREQ = 2000;   // 2 kHz
-const uint8_t  PWM_RES  = 8;      // 8-bit duty: 0..255
+const int PWM_FREQ = 25000;
+const int PWM_RES  = 8;
 
-const bool INVERT_PWM_OUTPUT = true;  // set false if your wiring makes it non-inverted
+const bool INVERTED_BY_NPN = true;
 
-uint32_t DUTY_MAX;
+uint32_t dutyMax;
 
-bool setDuty(uint32_t duty) {
-  if (duty > DUTY_MAX) duty = DUTY_MAX;
-  return ledcWrite(PWM_PIN, duty);   // v3.x API: ledcWrite(pin, duty)
+void setFanPercent(int pin, int percent) {
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+
+  uint32_t duty = (uint32_t)(percent * dutyMax / 100);
+
+  if (INVERTED_BY_NPN) duty = dutyMax - duty;
+
+  ledcWrite(pin, duty);
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
 
-  DUTY_MAX = (1UL << PWM_RES) - 1;
+  dutyMax = (1UL << PWM_RES) - 1;
 
-  // Attach PWM to pin (v3.x API)
-  if (!ledcAttach(PWM_PIN, PWM_FREQ, PWM_RES)) {
-    Serial.println("ERROR: ledcAttach failed. Try a different pin/freq/resolution.");
+  // Attach PWM generators to both pins
+  if (!ledcAttach(FAN1_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN1_PIN (25)");
+    while (true) delay(1000);
+  }
+  if (!ledcAttach(FAN2_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN2_PIN (26)");
     while (true) delay(1000);
   }
 
-  // Optional: invert PWM in hardware (helps with your single-NPN gate pull-down method)
-  if (!ledcOutputInvert(PWM_PIN, INVERT_PWM_OUTPUT)) {
-    Serial.println("WARNING: ledcOutputInvert failed (continuing).");
-  }
+  // Start both fans at 0%
+  setFanPercent(FAN1_PIN, 0);
+  setFanPercent(FAN2_PIN, 0);
 
-  // Start OFF (0% fan command)
-  setDuty(0);
-
-  Serial.println("ESP32 Fan PWM Test (core v3.x)");
-  Serial.print("Pin: "); Serial.println(PWM_PIN);
-  Serial.print("Freq: "); Serial.print(PWM_FREQ); Serial.println(" Hz");
-  Serial.print("Res: "); Serial.print(PWM_RES); Serial.println(" bits");
-  Serial.print("Invert output: "); Serial.println(INVERT_PWM_OUTPUT ? "true" : "false");
-  Serial.println("Commands: 0=off, 1=25%, 2=50%, 3=75%, 4=100%, r=ramp");
+  Serial.println("Two-fan control ready.");
+  Serial.println("Commands:");
+  Serial.println("  <pin> <percent>   e.g.  25 40   or  26 80");
+  Serial.println("  <fan#> <percent>  e.g.  1 40    or  2 80");
 }
 
 void loop() {
-  if (Serial.available()) {
-    char c = (char)Serial.read();
+  if (!Serial.available()) return;
 
-    if (c == '0') { setDuty(0);                 Serial.println("Duty 0%"); }
-    if (c == '1') { setDuty(DUTY_MAX * 25 / 100); Serial.println("Duty 25%"); }
-    if (c == '2') { setDuty(DUTY_MAX * 50 / 100); Serial.println("Duty 50%"); }
-    if (c == '3') { setDuty(DUTY_MAX * 75 / 100); Serial.println("Duty 75%"); }
-    if (c == '4') { setDuty(DUTY_MAX);            Serial.println("Duty 100%"); }
+  int a = Serial.parseInt();  // pin (25/26) OR fan number (1/2)
+  int b = Serial.parseInt();  // percent 0..100
+  while (Serial.available()) Serial.read(); // clear buffer
 
-    if (c == 'r' || c == 'R') {
-      Serial.println("Ramping up...");
-      for (uint32_t d = 0; d <= DUTY_MAX; d += 5) {
-        setDuty(d);
-        delay(50);
-      }
-      delay(400);
+  int targetPin = -1;
 
-      Serial.println("Ramping down...");
-      for (int d = (int)DUTY_MAX; d >= 0; d -= 5) {
-        setDuty((uint32_t)d);
-        delay(50);
-      }
-      setDuty(0);
-      Serial.println("Ramp done. Back to OFF.");
-    }
+  // Allow addressing by pin number
+  if (a == 25) targetPin = FAN1_PIN;
+  else if (a == 26) targetPin = FAN2_PIN;
+
+  // Or by fan number
+  else if (a == 1) targetPin = FAN1_PIN;
+  else if (a == 2) targetPin = FAN2_PIN;
+
+  if (targetPin == -1) {
+    Serial.println("Bad command. Use: 25 <pct> or 26 <pct> (or 1/2).");
+    return;
   }
 
-  delay(10);
+  setFanPercent(targetPin, b);
+
+  Serial.print("Set fan on GPIO");
+  Serial.print(targetPin);
+  Serial.print(" to ");
+  Serial.print(b);
+  Serial.println("%");
 }
