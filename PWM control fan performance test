@@ -3,6 +3,7 @@
 // PWM: 25 kHz, 8-bit duty (0..255)
 // Assumes NPN pull-down on each fan PWM wire => inverted logic
 
+
 const int FAN1_PIN = 25;
 const int FAN2_PIN = 26;
 
@@ -11,8 +12,10 @@ const int PWM_RES  = 8;
 
 const bool INVERTED_BY_NPN = true;
 
+//Initialize dutymax variable to toggle pwm resolution
 uint32_t dutyMax;
 
+// Function to write the pwm duty cycle given a percentage input 0 to 100
 void setFanPercent(int pin, int percent) {
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
@@ -28,6 +31,8 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  // Duty max is defined by pwm resolution
+  // When pwm setFanPercent function is called then dutymax determines what the pwm value will be
   dutyMax = (1UL << PWM_RES) - 1;
 
   // Attach PWM generators to both pins
@@ -40,38 +45,37 @@ void setup() {
     while (true) delay(1000);
   }
 
-  // Start both fans at 0%
+  // Start both fans at 0% with the percetnage duty cycle function
   setFanPercent(FAN1_PIN, 0);
   setFanPercent(FAN2_PIN, 0);
-
-  Serial.println("Two-fan control ready.");
-  Serial.println("Commands:");
-  Serial.println("  <pin> <percent>   e.g.  25 40   or  26 80");
-  Serial.println("  <fan#> <percent>  e.g.  1 40    or  2 80");
 }
 
 void loop() {
+  // Wait for input into the serial monitor
   if (!Serial.available()) return;
 
-  int a = Serial.parseInt();  // pin (25/26) OR fan number (1/2)
-  int b = Serial.parseInt();  // percent 0..100
-  while (Serial.available()) Serial.read(); // clear buffer
+  // fan number (1/2)
+  int a = Serial.parseInt();  
 
+  // percent 0..100
+  int b = Serial.parseInt();  
+  
+  // clear buffer
+  while (Serial.available()) Serial.read(); 
+
+  // Set pin checker value for invalid entries
   int targetPin = -1;
 
-  // Allow addressing by pin number
-  if (a == 25) targetPin = FAN1_PIN;
-  else if (a == 26) targetPin = FAN2_PIN;
-
-  // Or by fan number
-  else if (a == 1) targetPin = FAN1_PIN;
+  // Enter in 1 or 2 for fans 1 or 2
+  if (a == 1) targetPin = FAN1_PIN;
   else if (a == 2) targetPin = FAN2_PIN;
 
   if (targetPin == -1) {
-    Serial.println("Bad command. Use: 25 <pct> or 26 <pct> (or 1/2).");
+    Serial.println("Bad command: enter in 1 or 2 for fan address");
     return;
   }
 
+  // Call the fan percent function to write pwm values
   setFanPercent(targetPin, b);
 
   Serial.print("Set fan on GPIO");
