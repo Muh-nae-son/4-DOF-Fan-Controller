@@ -1,0 +1,142 @@
+// ESP32 (Arduino core 3.x) - 2x independent 4-wire PWM fan control
+// Pins: GPIO25 and GPIO26
+// PWM: 25 kHz, 8-bit duty (0..255)
+// Assumes NPN pull-down on each fan PWM wire => inverted logic
+
+const int FAN1_PIN = 25;
+const int FAN2_PIN = 26;
+const int FAN3_PIN = 17;
+const int FAN4_PIN = 16;
+
+const int PWM_FREQ = 25000;
+const int PWM_RES  = 8;
+
+const bool INVERTED_BY_NPN = true;
+
+// Initialize dutymax variable to toggle pwm resolution
+uint32_t dutyMax;
+
+// Function to write the pwm duty cycle given a percentage input 0 to 100
+void setFanPercent(int pin, int percent) {
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+
+  uint32_t duty = (uint32_t)(percent * dutyMax / 100);
+
+  if (INVERTED_BY_NPN) duty = dutyMax - duty;
+
+  ledcWrite(pin, duty);
+}
+
+// Set both fans to the same percentage
+void setBothFansPercent(int percent) {
+  setFanPercent(FAN1_PIN, percent);
+  setFanPercent(FAN2_PIN, percent);
+  setFanPercent(FAN3_PIN, percent);
+  setFanPercent(FAN4_PIN, percent);
+}
+
+// Ramp both fans together: 0 -> 100 -> 0
+void rampBothFans() {
+  Serial.println("Ramping both fans up...");
+
+  for (int percent = 0; percent <= 100; percent++) {
+    setBothFansPercent(percent);
+    Serial.print("Both fans: ");
+    Serial.print(percent);
+    Serial.println("%");
+    delay(50);   // increase for slower ramp, decrease for faster ramp
+  }
+
+  Serial.println("Ramping both fans down...");
+
+  for (int percent = 100; percent >= 0; percent--) {
+    setBothFansPercent(percent);
+    Serial.print("Both fans: ");
+    Serial.print(percent);
+    Serial.println("%");
+    delay(50);
+  }
+
+  Serial.println("Ramp complete.");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  // Duty max is defined by pwm resolution
+  dutyMax = (1UL << PWM_RES) - 1;
+
+  // Attach PWM generators to 4 pins
+  if (!ledcAttach(FAN1_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN1_PIN (25)");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN2_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN2_PIN (26)");
+    while (true) delay(1000);
+  }
+
+    if (!ledcAttach(FAN3_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN1_PIN (17)");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN4_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN2_PIN (16)");
+    while (true) delay(1000);
+  }
+
+  // Start both fans at 0%
+  setFanPercent(FAN1_PIN, 0);
+  setFanPercent(FAN2_PIN, 0);
+  setFanPercent(FAN3_PIN, 0);
+  setFanPercent(FAN4_PIN, 0);
+
+  Serial.println("Ready");
+}
+
+void loop() {
+  // Wait for input into the serial monitor
+  if (!Serial.available()) return;
+
+  // Command / fan number
+  int a = Serial.parseInt();
+
+  // Optional percent
+  int b = Serial.parseInt();
+
+  // Clear buffer
+  while (Serial.available()) Serial.read();
+
+  // Ramp both fans together
+  if (a == 5) {
+    rampBothFans();
+    return;
+  }
+
+  // Set pin checker value for invalid entries
+  int targetPin = -1;
+
+  // Enter in 1 or 2 for fans 1 or 2
+  if (a == 1) targetPin = FAN1_PIN;
+  else if (a == 2) targetPin = FAN2_PIN;
+  else if (a == 3) targetPin = FAN3_PIN;
+  else if (a == 4) targetPin = FAN4_PIN;
+
+  if (targetPin == -1) {
+    Serial.println("Bad command: enter 1 or 2 or 3 or 4 for a fan, or 5 to ramp all four");
+    return;
+  }
+
+  // Call the fan percent function to write pwm values
+  setFanPercent(targetPin, b);
+
+  Serial.print("Set fan on GPIO ");
+  Serial.print(targetPin);
+  Serial.print(" to ");
+  Serial.print(b);
+  Serial.println("%");
+}
