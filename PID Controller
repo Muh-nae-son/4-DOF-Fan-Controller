@@ -21,7 +21,7 @@ const uint8_t ADDR_R    = 0x31;
 const int FAN_LEFT_PIN  = 25;
 const int FAN_RIGHT_PIN = 26;
 
-const int PWM_FREQ = 25000;   // 4-wire fan standard
+const int PWM_FREQ = 25000;   
 const int PWM_RES  = 8;
 const bool INVERTED_BY_NPN = true;
 
@@ -43,7 +43,7 @@ float setpoint_mm = 0.0;
 // ==============================
 float Kp = 0.18;
 float Ki = 0.00;
-float Kd = 0.00;
+float Kd = 0.10;
 
 // ==============================
 // Control timing
