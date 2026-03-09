@@ -30,10 +30,8 @@ uint32_t dutyMax;
 // ==============================
 // Tube / setpoint
 // ==============================
-// Half-length = 18 in = 457.2 mm
 const float HALF_TUBE_MM = 457.2;
 
-// Setpoint relative to center
 float setpoint_mm = 0.0;
 
 // ==============================
@@ -54,6 +52,7 @@ unsigned long lastControlMs = 0;
 // ==============================
 float integral = 0.0;
 float prevError = 0.0;
+float prevPosition = 0.0;
 
 // ==============================
 // Fan behavior settings
@@ -61,7 +60,6 @@ float prevError = 0.0;
 const float MIN_FAN_PERCENT = 28.0;
 const float MAX_FAN_PERCENT = 100.0;
 
-// NEW: airflow bias and differential range
 const float FAN_BIAS_PERCENT = 40.0;
 const float MAX_DIFF_PERCENT = 35.0;
 
@@ -71,6 +69,7 @@ const float CONTROL_DEADBAND = 5.0;
 // Utility functions
 // ==============================
 bool initSensor(VL53L1X &sensor, uint8_t xshutPin, uint8_t newAddr) {
+
   digitalWrite(xshutPin, HIGH);
   delay(50);
 
@@ -87,6 +86,7 @@ bool initSensor(VL53L1X &sensor, uint8_t xshutPin, uint8_t newAddr) {
 }
 
 void setFanPercent(int pin, float percent) {
+
   percent = constrain(percent, 0.0, 100.0);
 
   uint32_t duty = (uint32_t)(percent * dutyMax / 100.0);
@@ -99,15 +99,18 @@ void setFanPercent(int pin, float percent) {
 }
 
 void setBothFans(float leftPercent, float rightPercent) {
+
   setFanPercent(FAN_LEFT_PIN, leftPercent);
   setFanPercent(FAN_RIGHT_PIN, rightPercent);
 }
 
 float computePositionMm(uint16_t dLeft, uint16_t dRight) {
+
   return ((float)dLeft - (float)dRight) / 2.0;
 }
 
 void stopFans() {
+
   setBothFans(0.0, 0.0);
 }
 
@@ -170,17 +173,16 @@ void loop() {
   float dt = (now - lastControlMs) / 1000.0;
   lastControlMs = now;
 
-  // Read sensors
   uint16_t dLeft  = sLeft.read();
   uint16_t dRight = sRight.read();
 
   if (sLeft.timeoutOccurred() || sRight.timeoutOccurred()) {
+
     Serial.println("TIMEOUT");
     stopFans();
     return;
   }
 
-  // Position estimate
   float position_mm = computePositionMm(dLeft, dRight);
 
   position_mm = constrain(position_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
@@ -192,12 +194,12 @@ void loop() {
   integral += error * dt;
   integral = constrain(integral, -300.0, 300.0);
 
-  float derivative = (error - prevError) / dt;
-  prevError = error;
+  // Derivative on measurement (velocity damping)
+  float derivative = -(position_mm - prevPosition) / dt;
+  prevPosition = position_mm;
 
   float u = Kp * error + Ki * integral + Kd * derivative;
 
-  // Clamp PID output to differential range
   u = constrain(u, -MAX_DIFF_PERCENT, MAX_DIFF_PERCENT);
 
   if (abs(u) < CONTROL_DEADBAND) {
