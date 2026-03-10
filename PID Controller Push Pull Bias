@@ -37,6 +37,201 @@ float setpoint_mm = 0.0;
 // ==============================
 // PID gains
 // ==============================
+float Kp = 0.005;
+float Ki = 0.00;
+float Kd = 0.0001;
+
+// ==============================
+// Control timing
+// ==============================
+const unsigned long controlPeriodMs = 50;
+unsigned long lastControlMs = 0;
+
+// ==============================
+// PID state
+// ==============================
+float integral = 0.0;
+float prevPosition = 0.0;
+
+// ==============================
+// Fan behavior settings
+// ==============================
+const float MIN_FAN_PERCENT = 5.0;
+const float MAX_FAN_PERCENT = 100.0;
+
+const float FAN_BIAS_PERCENT = 20.0;
+const float MAX_DIFF_PERCENT = 15.0;
+
+const float CONTROL_DEADBAND = 0.1;
+
+// ==============================
+// Utility functions
+// ==============================
+bool initSensor(VL53L1X &sensor, uint8_t xshutPin, uint8_t newAddr) {
+
+  digitalWrite(xshutPin, HIGH);
+  delay(50);
+
+  sensor.setTimeout(500);
+
+  if (!sensor.init()) return false;
+
+  sensor.setAddress(newAddr);
+  sensor.setDistanceMode(VL53L1X::Long);
+  sensor.setMeasurementTimingBudget(50000);
+  sensor.startContinuous(50);
+
+  return true;
+}
+
+void setFanPercent(int pin, float percent) {
+
+  percent = constrain(percent, 0.0, 100.0);
+
+  uint32_t duty = (uint32_t)(percent * dutyMax / 100.0);
+
+  if (INVERTED_BY_NPN) {
+    duty = dutyMax - duty;
+  }
+
+  ledcWrite(pin, duty);
+}
+
+void setBothFans(float leftPercent, float rightPercent) {
+
+  setFanPercent(FAN_LEFT_PIN, leftPercent);
+  setFanPercent(FAN_RIGHT_PIN, rightPercent);
+}
+
+float computePositionMm(uint16_t dLeft, uint16_t dRight) {
+
+  return ((float)dLeft - (float)dRight) / 2.0;
+}
+
+void stopFans() {
+
+  setBothFans(0.0, 0.0);
+}
+
+// ==============================
+// Setup
+// ==============================
+void setup() {
+
+  Serial.begin(115200);
+  delay(200);
+
+  dutyMax = (1UL << PWM_RES) - 1;
+
+  if (!ledcAttach(FAN_LEFT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for left fan");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN_RIGHT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for right fan");
+    while (true) delay(1000);
+  }
+
+  stopFans();
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  pinMode(XSHUT_L, OUTPUT);
+  pinMode(XSHUT_R, OUTPUT);
+
+  digitalWrite(XSHUT_L, LOW);
+  digitalWrite(XSHUT_R, LOW);
+  delay(20);
+
+  if (!initSensor(sLeft, XSHUT_L, ADDR_L)) {
+    Serial.println("ERROR: Left sensor init failed");
+    while (true) delay(1000);
+  }
+
+  if (!initSensor(sRight, XSHUT_R, ADDR_R)) {
+    Serial.println("ERROR: Right sensor init failed");
+    while (true) delay(1000);
+  }
+
+  Serial.println("PID ball-in-tube control started.");
+  Serial.print("Setpoint (mm): ");
+  Serial.println(setpoint_mm);
+}
+
+// ==============================
+// Main loop
+// ==============================
+void loop() {
+
+  unsigned long now = millis();
+
+  if (now - lastControlMs < controlPeriodMs) return;
+
+  float dt = (now - lastControlMs) / 1000.0;
+  lastControlMs = now;
+
+  uint16_t dLeft  = sLeft.read();
+  uint16_t dRight = sRight.read();
+
+  if (sLeft.timeoutOccurred() || sRight.timeoutOccurred()) {
+    Serial.println("TIMEOUT");
+    stopFans();
+    return;
+  }
+
+  float position_mm = computePositionMm(dLeft, dRight);
+  position_mm = constrain(position_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+
+  // ================= PID =================
+
+  float error = setpoint_mm - position_mm;
+
+  integral += error * dt;
+  integral = constrain(integral, -300.0, 300.0);
+
+  // Derivative on measurement
+  float derivative = -(position_mm - prevPosition) / dt;
+  prevPosition = position_mm;
+
+  float u = Kp * error + Ki * integral + Kd * derivative;
+
+  // u is the desired fan difference:
+  // rightCmd - leftCmd = u
+  u = constrain(u, -MAX_DIFF_PERCENT, MAX_DIFF_PERCENT);
+
+  if (abs(u) < CONTROL_DEADBAND) {
+    u = 0;
+  }
+
+  // ================= Fan Control =================
+  // Split u equally about the bias so the total airflow stays
+  // approximately constant:
+  // leftCmd + rightCmd = 2 * FAN_BIAS_PERCENT
+  // rightCmd - leftCmd = u
+
+  float leftCmd  = FAN_BIAS_PERCENT + 0.5 * u + 0.6;
+  float rightCmd = FAN_BIAS_PERCENT - 0.5 * u;
+
+  leftCmd  = constrain(leftCmd,  MIN_FAN_PERCENT, MAX_FAN_PERCENT);
+  rightCmd = constrain(rightCmd, MIN_FAN_PERCENT, MAX_FAN_PERCENT);
+
+  setBothFans(leftCmd, rightCmd);
+
+  // ================= Debug =================
+  Serial.print("dL: "); Serial.print(dLeft);
+  Serial.print("  dR: "); Serial.print(dRight);
+  Serial.print("  x(mm): "); Serial.print(position_mm, 1);
+  Serial.print("  sp(mm): "); Serial.print(setpoint_mm, 1);
+  Serial.print("  err: "); Serial.print(error, 1);
+  Serial.print("  u: "); Serial.print(u, 1);
+  Serial.print("  diff(L-R): "); Serial.print(leftCmd - rightCmd, 1);
+  Serial.print("  Lfan: "); Serial.print(leftCmd, 1);
+  Serial.print("  Rfan: "); Serial.println(rightCmd, 1);
+}// ==============================
+// PID gains
+// ==============================
 float Kp = 0.18;
 float Ki = 0.00;
 float Kd = 0.10;
