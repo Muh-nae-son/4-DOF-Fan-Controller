@@ -1,0 +1,258 @@
+#include <Wire.h>
+#include <VL53L1X.h>
+
+// ==============================
+// TOF sensor
+// ==============================
+VL53L1X sLeft;
+
+const uint8_t SDA_PIN   = 21;
+const uint8_t SCL_PIN   = 22;
+const uint8_t XSHUT_L   = 32;
+
+const uint8_t ADDR_L    = 0x30;
+
+// ==============================
+// Potentiometer
+// ==============================
+const int POT_PIN = 36;                 // GPIO36 / ADC1
+const int POT_RAW_MIN = 0;
+const int POT_RAW_MAX = 1970;
+const float SETPOINT_MIN_MM = -228.6;
+const float SETPOINT_MAX_MM =  228.6;
+
+// ==============================
+// Left sensor usable range
+// ==============================
+const float LEFT_SENSOR_MIN_MM = 10.0;   // one end of tube
+const float LEFT_SENSOR_MAX_MM = 450.0;  // other end of tube
+
+// ==============================
+// Fan PWM
+// ==============================
+const int FAN_LEFT_PIN  = 25;
+const int FAN_RIGHT_PIN = 26;
+
+const int PWM_FREQ = 25000;
+const int PWM_RES  = 8;
+const bool INVERTED_BY_NPN = true;
+
+uint32_t dutyMax;
+
+// ==============================
+// Tube / setpoint
+// ==============================
+const float HALF_TUBE_MM = 228.6;
+
+float setpoint_mm = 0;
+
+// ==============================
+// PID gains
+// ==============================
+float Kp = 0.01;
+float Ki = 0.00;
+float Kd = 0.008;
+
+// ==============================
+// Control timing
+// ==============================
+const unsigned long controlPeriodMs = 50;
+unsigned long lastControlMs = 0;
+
+// ==============================
+// PID state
+// ==============================
+float integral = 0.0;
+float prevPosition = 0.0;
+
+// ==============================
+// Fan behavior settings
+// ==============================
+const float MIN_FAN_PERCENT = 20.0;
+const float MAX_FAN_PERCENT = 22.0;
+
+const float FAN_BIAS_PERCENT = 20.0;
+const float MAX_DIFF_PERCENT = 15.0;
+
+const float CONTROL_DEADBAND = 0.1;
+
+// ==============================
+// Utility functions
+// ==============================
+bool initSensor(VL53L1X &sensor, uint8_t xshutPin, uint8_t newAddr) {
+  digitalWrite(xshutPin, HIGH);
+  delay(50);
+
+  sensor.setTimeout(500);
+
+  if (!sensor.init()) return false;
+
+  sensor.setAddress(newAddr);
+  sensor.setDistanceMode(VL53L1X::Long);
+  sensor.setMeasurementTimingBudget(50000);
+  sensor.startContinuous(50);
+
+  return true;
+}
+
+void setFanPercent(int pin, float percent) {
+  percent = constrain(percent, 0.0, 100.0);
+
+  uint32_t duty = (uint32_t)(percent * dutyMax / 100.0);
+
+  if (INVERTED_BY_NPN) {
+    duty = dutyMax - duty;
+  }
+
+  ledcWrite(pin, duty);
+}
+
+void setBothFans(float leftPercent, float rightPercent) {
+  setFanPercent(FAN_LEFT_PIN, leftPercent);
+  setFanPercent(FAN_RIGHT_PIN, rightPercent);
+}
+
+void stopFans() {
+  setBothFans(0.0, 0.0);
+}
+
+float readPotSetpointMm() {
+  int potRaw = analogRead(POT_PIN);
+
+  potRaw = constrain(potRaw, POT_RAW_MIN, POT_RAW_MAX);
+
+  float setpoint = SETPOINT_MIN_MM +
+                   ((float)(potRaw - POT_RAW_MIN) * (SETPOINT_MAX_MM - SETPOINT_MIN_MM)) /
+                   (float)(POT_RAW_MAX - POT_RAW_MIN);
+
+  return setpoint;
+}
+
+// Map left sensor reading only:
+// 10 mm  -> -228.6 mm
+// 450 mm -> +228.6 mm
+float computePositionMm(uint16_t dLeft) {
+  float d = constrain((float)dLeft, LEFT_SENSOR_MIN_MM, LEFT_SENSOR_MAX_MM);
+
+  float position = SETPOINT_MIN_MM +
+                   ((d - LEFT_SENSOR_MIN_MM) * (SETPOINT_MAX_MM - SETPOINT_MIN_MM)) /
+                   (LEFT_SENSOR_MAX_MM - LEFT_SENSOR_MIN_MM);
+
+  return position;
+}
+
+// ==============================
+// Setup
+// ==============================
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  dutyMax = (1UL << PWM_RES) - 1;
+
+  pinMode(POT_PIN, INPUT);
+
+  if (!ledcAttach(FAN_LEFT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for left fan");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN_RIGHT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for right fan");
+    while (true) delay(1000);
+  }
+
+  stopFans();
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  pinMode(XSHUT_L, OUTPUT);
+
+  digitalWrite(XSHUT_L, LOW);
+  delay(20);
+
+  if (!initSensor(sLeft, XSHUT_L, ADDR_L)) {
+    Serial.println("ERROR: Left sensor init failed");
+    while (true) delay(1000);
+  }
+
+  setpoint_mm = readPotSetpointMm();
+
+  // initialize previous position from current reading
+  uint16_t dLeft = sLeft.read();
+  if (!sLeft.timeoutOccurred()) {
+    prevPosition = computePositionMm(dLeft);
+  } else {
+    prevPosition = 0.0;
+  }
+
+  Serial.println("Single-sensor PID ball-in-tube control started.");
+  Serial.print("Initial setpoint (mm): ");
+  Serial.println(setpoint_mm);
+}
+
+// ==============================
+// Main loop
+// ==============================
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastControlMs < controlPeriodMs) return;
+
+  float dt = (now - lastControlMs) / 1000.0;
+  lastControlMs = now;
+
+  setpoint_mm = readPotSetpointMm();
+
+  uint16_t dLeft = sLeft.read();
+
+  if (sLeft.timeoutOccurred()) {
+    Serial.println("TIMEOUT");
+    stopFans();
+    return;
+  }
+
+  float position_mm = computePositionMm(dLeft);
+  position_mm = constrain(position_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+
+  // ================= PID =================
+  float error = setpoint_mm - position_mm;
+
+  integral += error * dt;
+  integral = constrain(integral, -300.0, 300.0);
+
+  float derivative = -(position_mm - prevPosition) / dt;
+  prevPosition = position_mm;
+
+  float u = Kp * error + Ki * integral + Kd * derivative;
+
+  // u is the desired fan difference
+  u = constrain(u, -MAX_DIFF_PERCENT, MAX_DIFF_PERCENT);
+
+  if (abs(u) < CONTROL_DEADBAND) {
+    u = 0;
+  }
+
+  // ================= Fan Control =================
+  float leftCmd  = FAN_BIAS_PERCENT + u + 0.2;
+  float rightCmd = 20.0;
+
+  leftCmd  = constrain(leftCmd,  MIN_FAN_PERCENT, MAX_FAN_PERCENT);
+  rightCmd = constrain(rightCmd, MIN_FAN_PERCENT, MAX_FAN_PERCENT);
+
+  setBothFans(leftCmd, rightCmd);
+
+  // ================= Debug =================
+  int potRaw = analogRead(POT_PIN);
+
+  Serial.print("pot: "); Serial.print(potRaw);
+  Serial.print("  dL: "); Serial.print(dLeft);
+  Serial.print("  x(mm): "); Serial.print(position_mm, 1);
+  Serial.print("  sp(mm): "); Serial.print(setpoint_mm, 1);
+  Serial.print("  err: "); Serial.print(error, 1);
+  Serial.print("  u: "); Serial.print(u, 1);
+  Serial.print("  diff(L-R): "); Serial.print(leftCmd - rightCmd, 1);
+  Serial.print("  Lfan: "); Serial.print(leftCmd, 1);
+  Serial.print("  Rfan: "); Serial.println(rightCmd, 1);
+}
