@@ -70,12 +70,12 @@ float setpoint2_mm = 0.0;   // Ball 2 setpoint from Ball 1 position
 // ==============================
 // Ball 1 PID
 float Kp1 = 0.005;
-float Ki1 = 0.00;
+float Ki1 = 0.001;
 float Kd1 = 0.002;
 
 // Ball 2 PID
 float Kp2 = 0.005;
-float Ki2 = 0.00;
+float Ki2 = 0.001;
 float Kd2 = 0.002;
 
 // ==============================
