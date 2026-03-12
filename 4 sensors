@@ -1,0 +1,145 @@
+#include <Wire.h>
+#include <VL53L1X.h>
+
+VL53L1X s1;
+VL53L1X s2;
+VL53L1X s3;
+VL53L1X s4;
+
+// I2C pins for ESP32
+const uint8_t SDA_PIN = 21;
+const uint8_t SCL_PIN = 22;
+
+// XSHUT pins
+const uint8_t XSHUT_1 = 27;
+const uint8_t XSHUT_2 = 14;
+const uint8_t XSHUT_3 = 32;
+const uint8_t XSHUT_4 = 33;
+
+// New I2C addresses
+const uint8_t ADDR_1 = 0x30;
+const uint8_t ADDR_2 = 0x31;
+const uint8_t ADDR_3 = 0x32;
+const uint8_t ADDR_4 = 0x33;
+
+bool initSensor(VL53L1X &sensor, uint8_t xshutPin, uint8_t newAddr, const char *name) {
+  Serial.print("Releasing ");
+  Serial.println(name);
+
+  // Release sensor from shutdown by making pin high impedance
+  pinMode(xshutPin, INPUT);
+  delay(100);
+
+  sensor.setTimeout(500);
+
+  Serial.print("Initializing ");
+  Serial.println(name);
+
+  if (!sensor.init()) {
+    Serial.print("ERROR: ");
+    Serial.print(name);
+    Serial.println(" init failed");
+    return false;
+  }
+
+  Serial.print("Setting address for ");
+  Serial.println(name);
+  sensor.setAddress(newAddr);
+
+  sensor.setDistanceMode(VL53L1X::Long);
+  sensor.setMeasurementTimingBudget(50000);  // 50 ms
+  sensor.startContinuous(50);                // 50 ms period
+
+  Serial.print(name);
+  Serial.print(" OK @ 0x");
+  Serial.println(newAddr, HEX);
+
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("Starting quad VL53L1X setup...");
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000);
+
+  // Force all sensors into shutdown first
+  pinMode(XSHUT_1, OUTPUT);
+  pinMode(XSHUT_2, OUTPUT);
+  pinMode(XSHUT_3, OUTPUT);
+  pinMode(XSHUT_4, OUTPUT);
+
+  digitalWrite(XSHUT_1, LOW);
+  digitalWrite(XSHUT_2, LOW);
+  digitalWrite(XSHUT_3, LOW);
+  digitalWrite(XSHUT_4, LOW);
+  delay(50);
+
+  Serial.println("All sensors held in shutdown");
+
+  // Bring up sensors one at a time and assign unique addresses
+  if (!initSensor(s1, XSHUT_1, ADDR_1, "S1")) {
+    while (1) {
+      Serial.println("S1 FAILED");
+      delay(1000);
+    }
+  }
+
+  if (!initSensor(s2, XSHUT_2, ADDR_2, "S2")) {
+    while (1) {
+      Serial.println("S2 FAILED");
+      delay(1000);
+    }
+  }
+
+  if (!initSensor(s3, XSHUT_3, ADDR_3, "S3")) {
+    while (1) {
+      Serial.println("S3 FAILED");
+      delay(1000);
+    }
+  }
+
+  if (!initSensor(s4, XSHUT_4, ADDR_4, "S4")) {
+    while (1) {
+      Serial.println("S4 FAILED");
+      delay(1000);
+    }
+  }
+
+  Serial.println("All sensors initialized successfully");
+}
+
+void loop() {
+  uint16_t d1 = s1.read();
+  uint16_t d2 = s2.read();
+  uint16_t d3 = s3.read();
+  uint16_t d4 = s4.read();
+
+  Serial.print("S1: ");
+  Serial.print(d1);
+  Serial.print(" mm   ");
+
+  Serial.print("S2: ");
+  Serial.print(d2);
+  Serial.print(" mm   ");
+
+  Serial.print("S3: ");
+  Serial.print(d3);
+  Serial.print(" mm   ");
+
+  Serial.print("S4: ");
+  Serial.print(d4);
+  Serial.print(" mm");
+
+  if (s1.timeoutOccurred()) Serial.print("  [S1 TIMEOUT]");
+  if (s2.timeoutOccurred()) Serial.print("  [S2 TIMEOUT]");
+  if (s3.timeoutOccurred()) Serial.print("  [S3 TIMEOUT]");
+  if (s4.timeoutOccurred()) Serial.print("  [S4 TIMEOUT]");
+
+  Serial.println();
+  delay(100);
+}
