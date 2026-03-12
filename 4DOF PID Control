@@ -69,14 +69,21 @@ float setpoint2_mm = 0.0;   // Ball 2 setpoint from Ball 1 position
 // PID gains
 // ==============================
 // Ball 1 PID
-float Kp1 = 0.01;
+float Kp1 = 0.005;
 float Ki1 = 0.00;
-float Kd1 = 0.01;
+float Kd1 = 0.002;
 
 // Ball 2 PID
-float Kp2 = 0.01;
+float Kp2 = 0.005;
 float Ki2 = 0.00;
-float Kd2 = 0.008;
+float Kd2 = 0.002;
+
+// ==============================
+// Position filter
+// ==============================
+// Smaller alpha = more smoothing
+const float POSITION_FILTER_ALPHA_1 = 0.25;
+const float POSITION_FILTER_ALPHA_2 = 0.25;
 
 // ==============================
 // Control timing
@@ -96,16 +103,24 @@ float integral2 = 0.0;
 float prevPosition2 = 0.0;
 
 // ==============================
+// Filter state
+// ==============================
+float filteredPosition1 = 0.0;
+float filteredPosition2 = 0.0;
+bool filterInitialized1 = false;
+bool filterInitialized2 = false;
+
+// ==============================
 // Fan behavior settings
 // ==============================
 const float MIN_FAN1_PERCENT = 19.0;
-const float MAX_FAN1_PERCENT = 22.0;
+const float MAX_FAN1_PERCENT = 22;
 
 const float FAN_BIAS1_PERCENT = 20.0;
 const float MAX_DIFF1_PERCENT = 15.0;
 
 const float MIN_FAN2_PERCENT = 19.0;
-const float MAX_FAN2_PERCENT = 22.0;
+const float MAX_FAN2_PERCENT = 22;
 
 const float FAN_BIAS2_PERCENT = 20.0;
 const float MAX_DIFF2_PERCENT = 15.0;
@@ -174,6 +189,16 @@ float readPotSetpointMm() {
   return setpoint;
 }
 
+float lowPassFilter(float rawValue, float &filteredValue, bool &initialized, float alpha) {
+  if (!initialized) {
+    filteredValue = rawValue;
+    initialized = true;
+  } else {
+    filteredValue = alpha * rawValue + (1.0 - alpha) * filteredValue;
+  }
+  return filteredValue;
+}
+
 // Generic PID helper
 float computePID(
   float setpoint,
@@ -183,20 +208,21 @@ float computePID(
   float Ki,
   float Kd,
   float &integral,
-  float &prevPosition
+  float &prevPosition,
+  float maxDiffPercent
 ) {
   float error = setpoint - position;
 
   integral += error * dt;
   integral = constrain(integral, -300.0, 300.0);
 
-  // Derivative on measurement
+  // Derivative on filtered measurement
   float derivative = -(position - prevPosition) / dt;
   prevPosition = position;
 
   float u = Kp * error + Ki * integral + Kd * derivative;
 
-  u = constrain(u, -MAX_DIFF1_PERCENT, MAX_DIFF1_PERCENT);
+  u = constrain(u, -maxDiffPercent, maxDiffPercent);
 
   if (abs(u) < CONTROL_DEADBAND) {
     u = 0.0;
@@ -309,8 +335,15 @@ void loop() {
     return;
   }
 
-  float position1_mm = computePositionMm(d1L, d1R);
-  position1_mm = constrain(position1_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+  float rawPosition1_mm = computePositionMm(d1L, d1R);
+  rawPosition1_mm = constrain(rawPosition1_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+
+  float position1_mm = lowPassFilter(
+    rawPosition1_mm,
+    filteredPosition1,
+    filterInitialized1,
+    POSITION_FILTER_ALPHA_1
+  );
 
   float u1 = computePID(
     setpoint1_mm,
@@ -318,7 +351,8 @@ void loop() {
     dt,
     Kp1, Ki1, Kd1,
     integral1,
-    prevPosition1
+    prevPosition1,
+    MAX_DIFF1_PERCENT
   );
 
   float leftCmd1  = FAN_BIAS1_PERCENT + u1 + 0.2;
@@ -343,8 +377,15 @@ void loop() {
     return;
   }
 
-  float position2_mm = computePositionMm(d2L, d2R);
-  position2_mm = constrain(position2_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+  float rawPosition2_mm = computePositionMm(d2L, d2R);
+  rawPosition2_mm = constrain(rawPosition2_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+
+  float position2_mm = lowPassFilter(
+    rawPosition2_mm,
+    filteredPosition2,
+    filterInitialized2,
+    POSITION_FILTER_ALPHA_2
+  );
 
   float u2 = computePID(
     setpoint2_mm,
@@ -352,7 +393,8 @@ void loop() {
     dt,
     Kp2, Ki2, Kd2,
     integral2,
-    prevPosition2
+    prevPosition2,
+    MAX_DIFF2_PERCENT
   );
 
   float leftCmd2  = FAN_BIAS2_PERCENT + u2;
@@ -372,7 +414,8 @@ void loop() {
 
   Serial.print(" | B1 dL: "); Serial.print(d1L);
   Serial.print(" dR: "); Serial.print(d1R);
-  Serial.print(" x1: "); Serial.print(position1_mm, 1);
+  Serial.print(" x1raw: "); Serial.print(rawPosition1_mm, 1);
+  Serial.print(" x1f: "); Serial.print(position1_mm, 1);
   Serial.print(" sp1: "); Serial.print(setpoint1_mm, 1);
   Serial.print(" u1: "); Serial.print(u1, 2);
   Serial.print(" L1: "); Serial.print(leftCmd1, 1);
@@ -380,7 +423,8 @@ void loop() {
 
   Serial.print(" || B2 dL: "); Serial.print(d2L);
   Serial.print(" dR: "); Serial.print(d2R);
-  Serial.print(" x2: "); Serial.print(position2_mm, 1);
+  Serial.print(" x2raw: "); Serial.print(rawPosition2_mm, 1);
+  Serial.print(" x2f: "); Serial.print(position2_mm, 1);
   Serial.print(" sp2: "); Serial.print(setpoint2_mm, 1);
   Serial.print(" u2: "); Serial.print(u2, 2);
   Serial.print(" L2: "); Serial.print(leftCmd2, 1);
