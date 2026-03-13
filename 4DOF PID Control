@@ -69,12 +69,12 @@ float setpoint2_mm = 0.0;   // Ball 2 setpoint from Ball 1 position
 // PID gains
 // ==============================
 // Ball 1 PID
-float Kp1 = 0.005;
+float Kp1 = 0.0048;
 float Ki1 = 0.001;
 float Kd1 = 0.002;
 
 // Ball 2 PID
-float Kp2 = 0.006;
+float Kp2 = 0.0033;
 float Ki2 = 0.001;
 float Kd2 = 0.002;
 
@@ -125,8 +125,8 @@ const float MAX_FAN2_PERCENT = 22;
 const float FAN_BIAS2_PERCENT = 20.0;
 const float MAX_DIFF2_PERCENT = 15.0;
 
-const float CONTROL_DEADBAND = 0.1;
-
+const float CONTROL_DEADBAND = 0.5;
+int potRaw = analogRead(POT_PIN);
 // ==============================
 // Utility functions
 // ==============================
@@ -225,7 +225,7 @@ float computePID(
   u = constrain(u, -maxDiffPercent, maxDiffPercent);
 
   if (abs(u) < CONTROL_DEADBAND) {
-    u = 0.0;
+    u = 0.6;
   }
 
   return u;
@@ -355,8 +355,15 @@ void loop() {
     MAX_DIFF1_PERCENT
   );
 
-  float leftCmd1  = FAN_BIAS1_PERCENT + u1 + 0.2;
+  float leftCmd1  = FAN_BIAS1_PERCENT + u1 + 0.45;
   float rightCmd1 = 20.0;
+
+  //if (position1_mm <= -198) {
+  //  leftCmd1 = 21.9;
+  //}
+  // if (position1_mm <= -198 && potRaw < 400) {
+  //  leftCmd1 = 22.3;
+  //} 
 
   leftCmd1  = constrain(leftCmd1,  MIN_FAN1_PERCENT, MAX_FAN1_PERCENT);
   rightCmd1 = constrain(rightCmd1, MIN_FAN1_PERCENT, MAX_FAN1_PERCENT);
