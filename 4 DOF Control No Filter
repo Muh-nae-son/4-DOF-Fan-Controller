@@ -1,0 +1,388 @@
+#include <Wire.h>
+#include <VL53L1X.h>
+
+// ==============================
+// TOF sensors
+// ==============================
+// Ball 1 sensors
+VL53L1X s1Left;
+VL53L1X s1Right;
+
+// Ball 2 sensors
+VL53L1X s2Left;
+VL53L1X s2Right;
+
+// I2C pins for ESP32
+const uint8_t SDA_PIN = 21;
+const uint8_t SCL_PIN = 22;
+
+// XSHUT pins
+// Ball 1
+const uint8_t XSHUT_1L = 32;
+const uint8_t XSHUT_1R = 33;
+
+// Ball 2
+const uint8_t XSHUT_2L = 27;
+const uint8_t XSHUT_2R = 14;
+
+// Unique I2C addresses
+const uint8_t ADDR_1L = 0x30;
+const uint8_t ADDR_1R = 0x31;
+const uint8_t ADDR_2L = 0x32;
+const uint8_t ADDR_2R = 0x33;
+
+// ==============================
+// Potentiometer
+// ==============================
+const int POT_PIN = 36;                 // GPIO36 / ADC1
+const int POT_RAW_MIN = 0;
+const int POT_RAW_MAX = 1970;
+const float SETPOINT_MIN_MM = -228.6;
+const float SETPOINT_MAX_MM =  228.6;
+
+// ==============================
+// Fan PWM
+// ==============================
+// Ball 1 fans
+const int FAN1_LEFT_PIN  = 25;
+const int FAN1_RIGHT_PIN = 26;
+
+// Ball 2 fans
+const int FAN2_LEFT_PIN  = 16;
+const int FAN2_RIGHT_PIN = 17;
+
+const int PWM_FREQ = 25000;
+const int PWM_RES  = 8;
+const bool INVERTED_BY_NPN = true;
+
+uint32_t dutyMax;
+
+// ==============================
+// Tube / setpoint
+// ==============================
+const float HALF_TUBE_MM = 457.2;
+
+float setpoint1_mm = 0.0;   // Ball 1 setpoint from potentiometer
+float setpoint2_mm = 0.0;   // Ball 2 setpoint from Ball 1 position
+
+// ==============================
+// PID gains
+// ==============================
+// Ball 1 PID
+float Kp1 = 0.01;
+float Ki1 = 0.00;
+float Kd1 = 0.01;
+
+// Ball 2 PID
+float Kp2 = 0.01;
+float Ki2 = 0.00;
+float Kd2 = 0.008;
+
+// ==============================
+// Control timing
+// ==============================
+const unsigned long controlPeriodMs = 50;
+unsigned long lastControlMs = 0;
+
+// ==============================
+// PID state
+// ==============================
+// Ball 1
+float integral1 = 0.0;
+float prevPosition1 = 0.0;
+
+// Ball 2
+float integral2 = 0.0;
+float prevPosition2 = 0.0;
+
+// ==============================
+// Fan behavior settings
+// ==============================
+const float MIN_FAN1_PERCENT = 19.0;
+const float MAX_FAN1_PERCENT = 22.0;
+
+const float FAN_BIAS1_PERCENT = 20.0;
+const float MAX_DIFF1_PERCENT = 15.0;
+
+const float MIN_FAN2_PERCENT = 19.0;
+const float MAX_FAN2_PERCENT = 22.0;
+
+const float FAN_BIAS2_PERCENT = 20.0;
+const float MAX_DIFF2_PERCENT = 15.0;
+
+const float CONTROL_DEADBAND = 0.1;
+
+// ==============================
+// Utility functions
+// ==============================
+bool initSensor(VL53L1X &sensor, uint8_t xshutPin, uint8_t newAddr) {
+  digitalWrite(xshutPin, HIGH);
+  delay(50);
+
+  sensor.setTimeout(500);
+
+  if (!sensor.init()) return false;
+
+  sensor.setAddress(newAddr);
+  sensor.setDistanceMode(VL53L1X::Long);
+  sensor.setMeasurementTimingBudget(50000);
+  sensor.startContinuous(50);
+
+  return true;
+}
+
+void setFanPercent(int pin, float percent) {
+  percent = constrain(percent, 0.0, 100.0);
+
+  uint32_t duty = (uint32_t)(percent * dutyMax / 100.0);
+
+  if (INVERTED_BY_NPN) {
+    duty = dutyMax - duty;
+  }
+
+  ledcWrite(pin, duty);
+}
+
+void setFansBall1(float leftPercent, float rightPercent) {
+  setFanPercent(FAN1_LEFT_PIN, leftPercent);
+  setFanPercent(FAN1_RIGHT_PIN, rightPercent);
+}
+
+void setFansBall2(float leftPercent, float rightPercent) {
+  setFanPercent(FAN2_LEFT_PIN, leftPercent);
+  setFanPercent(FAN2_RIGHT_PIN, rightPercent);
+}
+
+float computePositionMm(uint16_t dLeft, uint16_t dRight) {
+  return ((float)dLeft - (float)dRight) / 2.0;
+}
+
+void stopAllFans() {
+  setFansBall1(0.0, 0.0);
+  setFansBall2(0.0, 0.0);
+}
+
+float readPotSetpointMm() {
+  int potRaw = analogRead(POT_PIN);
+
+  potRaw = constrain(potRaw, POT_RAW_MIN, POT_RAW_MAX);
+
+  float setpoint = SETPOINT_MIN_MM +
+                   ((float)(potRaw - POT_RAW_MIN) * (SETPOINT_MAX_MM - SETPOINT_MIN_MM)) /
+                   (float)(POT_RAW_MAX - POT_RAW_MIN);
+
+  return setpoint;
+}
+
+// Generic PID helper
+float computePID(
+  float setpoint,
+  float position,
+  float dt,
+  float Kp,
+  float Ki,
+  float Kd,
+  float &integral,
+  float &prevPosition
+) {
+  float error = setpoint - position;
+
+  integral += error * dt;
+  integral = constrain(integral, -300.0, 300.0);
+
+  // Derivative on measurement
+  float derivative = -(position - prevPosition) / dt;
+  prevPosition = position;
+
+  float u = Kp * error + Ki * integral + Kd * derivative;
+
+  u = constrain(u, -MAX_DIFF1_PERCENT, MAX_DIFF1_PERCENT);
+
+  if (abs(u) < CONTROL_DEADBAND) {
+    u = 0.0;
+  }
+
+  return u;
+}
+
+// ==============================
+// Setup
+// ==============================
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  dutyMax = (1UL << PWM_RES) - 1;
+
+  pinMode(POT_PIN, INPUT);
+
+  // Attach PWM outputs
+  if (!ledcAttach(FAN1_LEFT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN1_LEFT_PIN");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN1_RIGHT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN1_RIGHT_PIN");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN2_LEFT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN2_LEFT_PIN");
+    while (true) delay(1000);
+  }
+
+  if (!ledcAttach(FAN2_RIGHT_PIN, PWM_FREQ, PWM_RES)) {
+    Serial.println("ERROR: ledcAttach failed for FAN2_RIGHT_PIN");
+    while (true) delay(1000);
+  }
+
+  stopAllFans();
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  // Hold all sensors in shutdown first
+  pinMode(XSHUT_1L, OUTPUT);
+  pinMode(XSHUT_1R, OUTPUT);
+  pinMode(XSHUT_2L, OUTPUT);
+  pinMode(XSHUT_2R, OUTPUT);
+
+  digitalWrite(XSHUT_1L, LOW);
+  digitalWrite(XSHUT_1R, LOW);
+  digitalWrite(XSHUT_2L, LOW);
+  digitalWrite(XSHUT_2R, LOW);
+  delay(20);
+
+  // Bring sensors up one at a time and assign unique addresses
+  if (!initSensor(s1Left, XSHUT_1L, ADDR_1L)) {
+    Serial.println("ERROR: Ball 1 Left sensor init failed");
+    while (true) delay(1000);
+  }
+
+  if (!initSensor(s1Right, XSHUT_1R, ADDR_1R)) {
+    Serial.println("ERROR: Ball 1 Right sensor init failed");
+    while (true) delay(1000);
+  }
+
+  if (!initSensor(s2Left, XSHUT_2L, ADDR_2L)) {
+    Serial.println("ERROR: Ball 2 Left sensor init failed");
+    while (true) delay(1000);
+  }
+
+  if (!initSensor(s2Right, XSHUT_2R, ADDR_2R)) {
+    Serial.println("ERROR: Ball 2 Right sensor init failed");
+    while (true) delay(1000);
+  }
+
+  // Initialize from pot
+  setpoint1_mm = readPotSetpointMm();
+  setpoint2_mm = 0.0;
+
+  Serial.println("Cascade PID ball-in-tube control started.");
+  Serial.print("Initial Ball 1 setpoint (mm): ");
+  Serial.println(setpoint1_mm);
+}
+
+// ==============================
+// Main loop
+// ==============================
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastControlMs < controlPeriodMs) return;
+
+  float dt = (now - lastControlMs) / 1000.0;
+  lastControlMs = now;
+
+  // ------------------------------
+  // Ball 1: setpoint from potentiometer
+  // ------------------------------
+  setpoint1_mm = readPotSetpointMm();
+
+  uint16_t d1L = s1Left.read();
+  uint16_t d1R = s1Right.read();
+
+  if (s1Left.timeoutOccurred() || s1Right.timeoutOccurred()) {
+    Serial.println("TIMEOUT: Ball 1 sensors");
+    stopAllFans();
+    return;
+  }
+
+  float position1_mm = computePositionMm(d1L, d1R);
+  position1_mm = constrain(position1_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+
+  float u1 = computePID(
+    setpoint1_mm,
+    position1_mm,
+    dt,
+    Kp1, Ki1, Kd1,
+    integral1,
+    prevPosition1
+  );
+
+  float leftCmd1  = FAN_BIAS1_PERCENT + u1 + 0.2;
+  float rightCmd1 = 20.0;
+
+  leftCmd1  = constrain(leftCmd1,  MIN_FAN1_PERCENT, MAX_FAN1_PERCENT);
+  rightCmd1 = constrain(rightCmd1, MIN_FAN1_PERCENT, MAX_FAN1_PERCENT);
+
+  setFansBall1(leftCmd1, rightCmd1);
+
+  // ------------------------------
+  // Ball 2: setpoint from Ball 1 position
+  // ------------------------------
+  setpoint2_mm = position1_mm;
+
+  uint16_t d2L = s2Left.read();
+  uint16_t d2R = s2Right.read();
+
+  if (s2Left.timeoutOccurred() || s2Right.timeoutOccurred()) {
+    Serial.println("TIMEOUT: Ball 2 sensors");
+    stopAllFans();
+    return;
+  }
+
+  float position2_mm = computePositionMm(d2L, d2R);
+  position2_mm = constrain(position2_mm, -HALF_TUBE_MM, HALF_TUBE_MM);
+
+  float u2 = computePID(
+    setpoint2_mm,
+    position2_mm,
+    dt,
+    Kp2, Ki2, Kd2,
+    integral2,
+    prevPosition2
+  );
+
+  float leftCmd2  = FAN_BIAS2_PERCENT + u2;
+  float rightCmd2 = 19.0;
+
+  leftCmd2  = constrain(leftCmd2,  MIN_FAN2_PERCENT, MAX_FAN2_PERCENT);
+  rightCmd2 = constrain(rightCmd2, MIN_FAN2_PERCENT, MAX_FAN2_PERCENT);
+
+  setFansBall2(leftCmd2, rightCmd2);
+
+  // ------------------------------
+  // Debug
+  // ------------------------------
+  int potRaw = analogRead(POT_PIN);
+
+  Serial.print("pot: "); Serial.print(potRaw);
+
+  Serial.print(" | B1 dL: "); Serial.print(d1L);
+  Serial.print(" dR: "); Serial.print(d1R);
+  Serial.print(" x1: "); Serial.print(position1_mm, 1);
+  Serial.print(" sp1: "); Serial.print(setpoint1_mm, 1);
+  Serial.print(" u1: "); Serial.print(u1, 2);
+  Serial.print(" L1: "); Serial.print(leftCmd1, 1);
+  Serial.print(" R1: "); Serial.print(rightCmd1, 1);
+
+  Serial.print(" || B2 dL: "); Serial.print(d2L);
+  Serial.print(" dR: "); Serial.print(d2R);
+  Serial.print(" x2: "); Serial.print(position2_mm, 1);
+  Serial.print(" sp2: "); Serial.print(setpoint2_mm, 1);
+  Serial.print(" u2: "); Serial.print(u2, 2);
+  Serial.print(" L2: "); Serial.print(leftCmd2, 1);
+  Serial.print(" R2: "); Serial.println(rightCmd2, 1);
+}
