@@ -74,7 +74,7 @@ float Ki1 = 0.001;
 float Kd1 = 0.002;
 
 // Ball 2 PID
-float Kp2 = 0.005;
+float Kp2 = 0.006;
 float Ki2 = 0.001;
 float Kd2 = 0.002;
 
